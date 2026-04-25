@@ -1,0 +1,7 @@
+# EdgeAI Green Routes – vehicle detector node
+# Install with: pip install -r requirements.txt
+ 
+ultralytics>=8.0.0        # YOLOv8n / YOLO11n inference + optional ByteTrack
+opencv-python>=4.8.0      # frame capture and optional display
+numpy>=1.24.0             # array operations
+ 
