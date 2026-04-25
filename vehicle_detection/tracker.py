@@ -233,12 +233,8 @@ class CentroidTracker:
           STATIONARY→ MOVING    if speed > threshold again
         """
         speed = _compute_speed(tr.positions)
-        disp  = _compute_total_displacement(tr.positions)
 
-        is_fast = (
-            speed > SPEED_THRESHOLD_PX_PER_SEC
-            or disp > MOVE_THRESHOLD_PX
-        )
+        is_fast = speed > SPEED_THRESHOLD_PX_PER_SEC
 
         if is_fast:
             # Vehicle is (or became) moving
