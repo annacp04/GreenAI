@@ -2,26 +2,21 @@
 main.py
 -------
 EdgeAI Green Routes – vehicle detector node.
-Runs on the Linux/Python side of the Arduino UNO Q.
+Corre en el lado Linux/Python del Arduino UNO Q.
 
-Usage examples
---------------
-# Webcam, display on screen:
-  python main.py --source 0 --display
+Salida por ventana de tiempo:
+  - count_motorcycle   : motos únicas vistas
+  - count_car          : coches únicos vistos
+  - count_heavy        : buses/camiones únicos vistos
+  - mean_per_min_*     : media de vehículos visibles por minuto de cada tipo
 
-# Video file, headless, CSV + JSONL output:
-  python main.py --video sample_traffic.mp4 --headless \
-                 --output_csv traffic_features.csv \
-                 --output_json traffic_features.jsonl
-
-# Use YOLO11n instead of YOLOv8n:
-  python main.py --model yolo11n.pt --video sample_traffic.mp4 --display
-
-# Save annotated demo video:
-  python main.py --video sample_traffic.mp4 --save_annotated_video output.mp4
-
-# Smaller image size for speed on UNO Q:
-  python main.py --source 0 --imgsz 320 --headless
+Uso
+---
+  python main.py --source 0 --display                        # webcam
+  python main.py --video clip.mp4 --headless --output_csv out.csv
+  python main.py --model yolo11n.pt --video clip.mp4 --display
+  python main.py --source 0 --imgsz 320 --headless           # más rápido en UNO Q
+  python main.py --video clip.mp4 --save_annotated_video demo.mp4
 """
 
 from __future__ import annotations
@@ -29,7 +24,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import sys
 import time
 from typing import Dict, List, Optional
@@ -44,7 +38,6 @@ from config import (
     TERMINAL_PRINT_INTERVAL_SEC,
 )
 from data_structures import Detection, Track, WindowFeatures
-from exposure_score import compute_exposure_score, compute_weighted_moving_visible
 from traffic_aggregator import TrafficAggregator
 from tracker import CentroidTracker
 from visualization import draw_frame, draw_legend
@@ -52,118 +45,88 @@ from yolo_detector import YOLODetector
 
 
 # ---------------------------------------------------------------------------
-# CLI argument parser
+# CLI
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="EdgeAI Green Routes – vehicle detector node"
-    )
+    p = argparse.ArgumentParser(description="EdgeAI Green Routes – vehicle detector node")
     p.add_argument("--model",   default=DEFAULT_MODEL,
-                   help="YOLO model weights (yolov8n.pt or yolo11n.pt)")
+                   help="Pesos YOLO (yolov8n.pt o yolo11n.pt)")
     p.add_argument("--source",  default=None, type=int,
-                   help="Webcam device index (e.g. 0)")
+                   help="Índice de webcam (ej. 0)")
     p.add_argument("--video",   default=None,
-                   help="Path to input video file")
+                   help="Ruta al fichero de vídeo")
     p.add_argument("--output_csv",  default=None,
-                   help="Path for CSV window summaries")
+                   help="Ruta del CSV de salida")
     p.add_argument("--output_json", default=None,
-                   help="Path for JSONL window summaries")
+                   help="Ruta del JSONL de salida")
     p.add_argument("--display",  action="store_true",
-                   help="Show live OpenCV window")
+                   help="Mostrar ventana OpenCV")
     p.add_argument("--headless", action="store_true",
-                   help="Run without any display (overrides --display)")
+                   help="Sin visualización (anula --display)")
     p.add_argument("--imgsz",   default=IMAGE_SIZE, type=int,
-                   help="YOLO inference image size (640, 416, 320)")
+                   help="Resolución de inferencia YOLO (640, 416, 320)")
     p.add_argument("--conf",    default=CONFIDENCE_THRESHOLD, type=float,
-                   help="YOLO confidence threshold")
+                   help="Umbral de confianza YOLO")
     p.add_argument("--window_seconds", default=WINDOW_SECONDS, type=float,
-                   help="Aggregation window duration in seconds")
+                   help="Duración de la ventana de agregación (segundos)")
     p.add_argument("--use_yolo_tracker", action="store_true",
-                   help="Use Ultralytics built-in tracker (ByteTrack/BoT-SORT)")
+                   help="Usar tracker interno de Ultralytics (ByteTrack/BoT-SORT)")
     p.add_argument("--save_annotated_video", default=None,
-                   help="Save annotated frames to this video file")
+                   help="Guardar vídeo anotado en esta ruta")
     return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# Helpers de salida
 # ---------------------------------------------------------------------------
 
-def init_csv(path: str) -> tuple:
-    """Open a CSV file and write the header row. Returns (file, writer)."""
-    fh = open(path, "w", newline="")
-    fieldnames = list(WindowFeatures(0, 0).to_dict().keys())
+def init_csv(path: str):
+    """Abre el CSV y escribe la cabecera. Devuelve (file, writer)."""
+    fh = open(path, "w", newline="", encoding="utf-8")
+    fieldnames = list(WindowFeatures(0, 0, 0).to_dict().keys())
     writer = csv.DictWriter(fh, fieldnames=fieldnames)
     writer.writeheader()
     return fh, writer
 
 
-def write_csv_row(writer, wf: WindowFeatures) -> None:
-    writer.writerow(wf.to_dict())
-
-
-def write_jsonl_row(fh, wf: WindowFeatures) -> None:
-    fh.write(json.dumps(wf.to_dict()) + "\n")
-    fh.flush()
-
-
 def print_window_summary(wf: WindowFeatures) -> None:
+    t_start = time.strftime("%H:%M:%S", time.localtime(wf.window_start))
+    t_end   = time.strftime("%H:%M:%S", time.localtime(wf.window_end))
     print(
-        f"\n{'='*60}\n"
-        f"  WINDOW SUMMARY  {time.strftime('%H:%M:%S', time.localtime(wf.window_start))}"
-        f" → {time.strftime('%H:%M:%S', time.localtime(wf.window_end))}\n"
-        f"  Unique movers  : light={wf.unique_light_moving}  "
-        f"medium={wf.unique_medium_moving}  heavy={wf.unique_heavy_moving}\n"
-        f"  Moving now     : light={wf.current_light_moving}  "
-        f"medium={wf.current_medium_moving}  heavy={wf.current_heavy_moving}\n"
-        f"  Stationary now : light={wf.stationary_light_count}  "
-        f"medium={wf.stationary_medium_count}  heavy={wf.stationary_heavy_count}\n"
-        f"  Weighted mov.s : {wf.weighted_moving_seconds:.1f} vehicle-seconds\n"
-        f"  Peak weighted  : {wf.max_weighted_moving_visible:.2f}\n"
-        f"  ► EXPOSURE     : {wf.traffic_exposure_score:.1f} / 100  [{wf.exposure_category}]\n"
-        f"  FPS mean       : {wf.fps_mean:.1f}\n"
-        f"{'='*60}"
+        f"\n{'='*55}\n"
+        f"  VENTANA  {t_start} → {t_end}  ({wf.window_seconds:.0f}s)\n"
+        f"  Vehículos únicos vistos:\n"
+        f"    Motos        : {wf.count_motorcycle}\n"
+        f"    Coches       : {wf.count_car}\n"
+        f"    Buses/Camion : {wf.count_heavy}\n"
+        f"  Media visibles/minuto:\n"
+        f"    Motos        : {wf.mean_per_min_motorcycle:.2f}\n"
+        f"    Coches       : {wf.mean_per_min_car:.2f}\n"
+        f"    Buses/Camion : {wf.mean_per_min_heavy:.2f}\n"
+        f"  FPS medio      : {wf.fps_mean:.1f}\n"
+        f"{'='*55}"
     )
 
 
-def print_live_status(
-    timestamp: float,
-    snapshot: dict,
-    score: float,
-    category: str,
-    fps: float,
-    window_elapsed: float,
-) -> None:
+def print_live_status(snapshot: dict, fps: float, window_elapsed: float) -> None:
     print(
-        f"[{time.strftime('%H:%M:%S')}] "
-        f"Moving: L={snapshot['light']} M={snapshot['medium']} H={snapshot['heavy']} | "
-        f"Stationary: L={snapshot['stat_light']} M={snapshot['stat_medium']} H={snapshot['stat_heavy']} | "
-        f"Score: {score:.1f} [{category}] | "
-        f"FPS: {fps:.1f} | "
-        f"Win: {window_elapsed:.0f}s"
+        f"[{time.strftime('%H:%M:%S')}]  "
+        f"Visibles → motos:{snapshot['motorcycle']}  "
+        f"coches:{snapshot['car']}  "
+        f"pesados:{snapshot['heavy']}  | "
+        f"FPS:{fps:.1f}  Win:{window_elapsed:.0f}s"
     )
 
-
-# ---------------------------------------------------------------------------
-# Map active_tracks → detections (needed for bbox drawing)
-# We rebuild this from YOLO output each frame.
-# ---------------------------------------------------------------------------
 
 def build_detection_by_track(
     active_tracks: Dict[int, Track],
     detections: List[Detection],
-    tracker: CentroidTracker,
 ) -> Dict[int, Detection]:
-    """
-    Best-effort map of track_id → most-recent Detection.
-    Used only for bounding-box drawing; not critical for pipeline logic.
-    """
+    """Asocia track_id → Detection más reciente (para dibujar los bboxes)."""
     result: Dict[int, Detection] = {}
-    # Simple: pair by centroid proximity to last known position
     for det in detections:
-        best_id   = None
-        best_dist = 9999.0
+        best_id, best_dist = None, 9999.0
         for tid, tr in active_tracks.items():
             if not tr.positions:
                 continue
@@ -178,7 +141,7 @@ def build_detection_by_track(
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Bucle principal
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -186,150 +149,132 @@ def main() -> None:
 
     show_display = args.display and not args.headless
 
-    # --- Video source ------------------------------------------------------
+    # --- Fuente de vídeo ---------------------------------------------------
     source = args.source if args.source is not None else args.video
     if source is None:
-        print("[ERROR] Specify --source 0 for webcam or --video <path> for a file.")
+        print("[ERROR] Especifica --source 0 (webcam) o --video <ruta>.")
         sys.exit(1)
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        print(f"[ERROR] Cannot open video source: {source}")
+        print(f"[ERROR] No se puede abrir la fuente: {source}")
         sys.exit(1)
 
     frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     source_fps   = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    print(f"[main] Source: {source}  Resolution: {frame_width}×{frame_height}  FPS: {source_fps:.1f}")
+    print(f"[main] Fuente: {source}  {frame_width}×{frame_height}  {source_fps:.1f} fps")
 
-    # --- Output video writer -----------------------------------------------
+    # --- Writer de vídeo anotado ------------------------------------------
     video_writer = None
     if args.save_annotated_video:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         video_writer = cv2.VideoWriter(
             args.save_annotated_video, fourcc, source_fps, (frame_width, frame_height)
         )
-        print(f"[main] Saving annotated video to: {args.save_annotated_video}")
+        print(f"[main] Guardando vídeo anotado en: {args.save_annotated_video}")
 
-    # --- YOLO detector -----------------------------------------------------
-    detector = YOLODetector(
-        model_path=args.model,
-        imgsz=args.imgsz,
-        conf=args.conf,
-    )
+    # --- Detector YOLO -----------------------------------------------------
+    detector = YOLODetector(model_path=args.model, imgsz=args.imgsz, conf=args.conf)
 
     # --- Tracker -----------------------------------------------------------
-    tracker = CentroidTracker()
-    print(f"[main] Tracker: {'YOLO built-in' if args.use_yolo_tracker else 'Centroid (default)'}")
-
-    # --- Aggregator --------------------------------------------------------
+    tracker    = CentroidTracker()
     aggregator = TrafficAggregator(window_seconds=args.window_seconds)
+    print(f"[main] Tracker: {'YOLO built-in' if args.use_yolo_tracker else 'Centroide (default)'}")
+    print(f"[main] Ventana: {args.window_seconds}s")
 
-    # --- Output files ------------------------------------------------------
+    # --- Ficheros de salida ------------------------------------------------
     csv_fh = csv_writer = json_fh = None
     if args.output_csv:
         csv_fh, csv_writer = init_csv(args.output_csv)
-        print(f"[main] CSV output: {args.output_csv}")
+        print(f"[main] CSV → {args.output_csv}")
     if args.output_json:
-        json_fh = open(args.output_json, "a")
-        print(f"[main] JSONL output: {args.output_json}")
+        json_fh = open(args.output_json, "a", encoding="utf-8")
+        print(f"[main] JSONL → {args.output_json}")
 
-    # --- Loop state --------------------------------------------------------
-    frame_count      = 0
-    fps              = 0.0
-    last_fps_time    = time.time()
-    last_print_time  = time.time()
-    last_score       = 0.0
-    last_category    = "LOW"
+    # --- Estado del bucle --------------------------------------------------
+    frame_count     = 0
+    fps             = 0.0
+    last_print_time = time.time()
 
-    print("[main] Starting detection loop. Press 'q' to quit.")
+    print("[main] Iniciando detección. Pulsa 'q' para salir.\n")
 
     try:
         while True:
-            t_frame_start = time.time()
+            t0 = time.time()
+
             ret, frame = cap.read()
             if not ret:
-                print("[main] End of stream or read error.")
+                print("[main] Fin del stream.")
                 break
 
             frame_count += 1
             timestamp = time.time()
 
-            # --- Detect ----------------------------------------------------
+            # --- Detección -------------------------------------------------
             if args.use_yolo_tracker:
                 detections, yolo_ids = detector.detect_with_tracker(frame)
             else:
                 detections = detector.detect(frame)
                 yolo_ids   = None
 
-            # --- Track -----------------------------------------------------
+            # --- Tracking --------------------------------------------------
             active_tracks = tracker.update(detections, timestamp, yolo_ids)
 
-            # --- Aggregate -------------------------------------------------
+            # --- Agregación ------------------------------------------------
             aggregator.update(active_tracks, timestamp, fps)
 
-            # --- Live snapshot for display / printing ----------------------
-            snapshot = aggregator.get_live_snapshot(active_tracks)
-
-            # Live score estimate (using partial window data)
-            live_weighted = snapshot["weighted_moving_visible"]
-
-            # --- Check if window is complete -------------------------------
+            # --- Cerrar ventana si toca ------------------------------------
             elapsed = aggregator.seconds_since_window_start(timestamp)
             if elapsed >= args.window_seconds:
                 wf = aggregator.close_window(active_tracks, timestamp)
-                last_score    = wf.traffic_exposure_score
-                last_category = wf.exposure_category
                 print_window_summary(wf)
 
                 if csv_writer:
-                    write_csv_row(csv_writer, wf)
-                    if csv_fh:
-                        csv_fh.flush()
+                    csv_writer.writerow(wf.to_dict())
+                    csv_fh.flush()
                 if json_fh:
-                    write_jsonl_row(json_fh, wf)
+                    json_fh.write(json.dumps(wf.to_dict()) + "\n")
+                    json_fh.flush()
 
-            # --- FPS calculation -------------------------------------------
-            t_frame_end = time.time()
-            frame_time = t_frame_end - t_frame_start
+            # --- FPS -------------------------------------------------------
+            frame_time = time.time() - t0
             fps = 1.0 / frame_time if frame_time > 0 else 0.0
 
-            # --- Periodic terminal print -----------------------------------
+            # --- Print periódico -------------------------------------------
             if timestamp - last_print_time >= TERMINAL_PRINT_INTERVAL_SEC:
+                snapshot = aggregator.get_live_snapshot(active_tracks)
                 print_live_status(
-                    timestamp, snapshot,
-                    last_score, last_category,
-                    fps,
+                    snapshot, fps,
                     aggregator.seconds_since_window_start(timestamp),
                 )
                 last_print_time = timestamp
 
-            # --- Visualisation --------------------------------------------
+            # --- Visualización --------------------------------------------
             if show_display or video_writer:
-                det_by_track = build_detection_by_track(active_tracks, detections, tracker)
+                snapshot = aggregator.get_live_snapshot(active_tracks)
+                det_by_track = build_detection_by_track(active_tracks, detections)
                 annotated = draw_frame(
                     frame,
                     active_tracks,
                     det_by_track,
-                    last_score,
-                    last_category,
-                    fps,
-                    aggregator.seconds_since_window_start(timestamp),
+                    exposure_score=0.0,           # ya no usamos score
+                    exposure_category="",
+                    fps=fps,
+                    window_elapsed_s=aggregator.seconds_since_window_start(timestamp),
                 )
                 draw_legend(annotated)
 
                 if show_display:
-                    cv2.imshow("EdgeAI Green Routes – vehicle detector", annotated)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
-                        print("[main] User pressed 'q'. Exiting.")
+                    cv2.imshow("EdgeAI Green Routes", annotated)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        print("[main] Usuario pulsó 'q'.")
                         break
 
                 if video_writer:
                     video_writer.write(annotated)
 
     finally:
-        # --- Clean up ------------------------------------------------------
         cap.release()
         if video_writer:
             video_writer.release()
@@ -340,7 +285,7 @@ def main() -> None:
         if json_fh:
             json_fh.close()
 
-        print(f"\n[main] Done. Processed {frame_count} frames.")
+        print(f"\n[main] Fin. Frames procesados: {frame_count}")
 
 
 if __name__ == "__main__":

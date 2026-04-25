@@ -42,12 +42,10 @@ class Track:
     # One of: UNKNOWN / MOVING / STATIONARY / LOST
     state: str = "UNKNOWN"
 
-    # Aggregation helpers (reset each window)
+    # Whether this track has already been counted in the current window
     is_counted_in_current_window: bool = False
 
     # Accumulated durations (carry across windows for the same track)
-    moving_seconds:     float = 0.0
-    stationary_seconds: float = 0.0
     missing_seconds:    float = 0.0
 
     # Internal: timestamp when the track last transitioned into STATIONARY
@@ -62,72 +60,35 @@ class Track:
 # ---------------------------------------------------------------------------
 @dataclass
 class WindowFeatures:
-    window_start: float    # epoch seconds
+    window_start: float   # epoch seconds
     window_end:   float
+    window_seconds: float # actual duration of this window
 
-    # Unique vehicles that were MOVING at least once during the window
-    unique_light_moving:  int = 0
-    unique_medium_moving: int = 0
-    unique_heavy_moving:  int = 0
+    # --- Total unique vehicles seen during the window (counted once each) --
+    count_motorcycle: int = 0   # light_vehicle
+    count_car:        int = 0   # medium_vehicle
+    count_heavy:      int = 0   # heavy_vehicle (bus + truck)
 
-    # Vehicles moving RIGHT NOW at window close (snapshot)
-    current_light_moving:  int = 0
-    current_medium_moving: int = 0
-    current_heavy_moving:  int = 0
+    # --- Mean vehicles visible per minute for each type --------------------
+    # Computed as: (sum of per-frame counts) / (window_minutes)
+    mean_per_min_motorcycle: float = 0.0
+    mean_per_min_car:        float = 0.0
+    mean_per_min_heavy:      float = 0.0
 
-    # Vehicles stationary RIGHT NOW at window close
-    stationary_light_count:  int = 0
-    stationary_medium_count: int = 0
-    stationary_heavy_count:  int = 0
-
-    # Total seconds each class spent MOVING during the window
-    moving_vehicle_seconds_light:  float = 0.0
-    moving_vehicle_seconds_medium: float = 0.0
-    moving_vehicle_seconds_heavy:  float = 0.0
-
-    # Total seconds all vehicles spent STATIONARY during the window
-    stationary_vehicle_seconds: float = 0.0
-
-    # Weighted aggregates (used for exposure score)
-    total_moving_weighted_count:  float = 0.0   # sum of weights of unique movers
-    weighted_moving_seconds:       float = 0.0   # sum(weight * moving_seconds)
-
-    # Statistics over frames within the window
-    mean_moving_vehicles_visible: float = 0.0
-    max_moving_vehicles_visible:  int   = 0
-    max_weighted_moving_visible:  float = 0.0
-
-    # Exposure
-    traffic_exposure_score: float = 0.0
-    exposure_category: str = "LOW"
-
-    # Performance
+    # --- FPS info ----------------------------------------------------------
     fps_mean: float = 0.0
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict (for CSV / JSONL output)."""
         return {
-            "window_start": self.window_start,
-            "window_end":   self.window_end,
-            "unique_light_moving":  self.unique_light_moving,
-            "unique_medium_moving": self.unique_medium_moving,
-            "unique_heavy_moving":  self.unique_heavy_moving,
-            "current_light_moving":  self.current_light_moving,
-            "current_medium_moving": self.current_medium_moving,
-            "current_heavy_moving":  self.current_heavy_moving,
-            "stationary_light_count":  self.stationary_light_count,
-            "stationary_medium_count": self.stationary_medium_count,
-            "stationary_heavy_count":  self.stationary_heavy_count,
-            "moving_vehicle_seconds_light":  self.moving_vehicle_seconds_light,
-            "moving_vehicle_seconds_medium": self.moving_vehicle_seconds_medium,
-            "moving_vehicle_seconds_heavy":  self.moving_vehicle_seconds_heavy,
-            "stationary_vehicle_seconds":    self.stationary_vehicle_seconds,
-            "total_moving_weighted_count":   self.total_moving_weighted_count,
-            "weighted_moving_seconds":        self.weighted_moving_seconds,
-            "mean_moving_vehicles_visible":  self.mean_moving_vehicles_visible,
-            "max_moving_vehicles_visible":   self.max_moving_vehicles_visible,
-            "max_weighted_moving_visible":   self.max_weighted_moving_visible,
-            "traffic_exposure_score": self.traffic_exposure_score,
-            "exposure_category":      self.exposure_category,
-            "fps_mean":               self.fps_mean,
+            "window_start":          self.window_start,
+            "window_end":            self.window_end,
+            "window_seconds":        self.window_seconds,
+            "count_motorcycle":      self.count_motorcycle,
+            "count_car":             self.count_car,
+            "count_heavy":           self.count_heavy,
+            "mean_per_min_motorcycle": round(self.mean_per_min_motorcycle, 2),
+            "mean_per_min_car":        round(self.mean_per_min_car,        2),
+            "mean_per_min_heavy":      round(self.mean_per_min_heavy,      2),
+            "fps_mean":              round(self.fps_mean, 2),
         }
