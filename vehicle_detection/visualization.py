@@ -75,10 +75,16 @@ def draw_frame(
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, THICKNESS + 1)
 
-            label_text = (
-                f"[{tid}] {tr.project_class.split('_')[0].upper()} "
-                f"{'▶' if state == 'MOVING' else '■'}"
-            )
+            if state == "MOVING":
+                state_text = "MOV"
+            elif state == "STATIONARY":
+                state_text = "STAT"
+            elif state == "UNKNOWN":
+                state_text = "UNK"
+            else:
+                state_text = state
+
+            label_text = f"[{tid}] {tr.project_class.split('_')[0].upper()} {state_text}"
             (tw, th), _ = cv2.getTextSize(label_text, FONT, FONT_SCALE, THICKNESS)
             cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
             cv2.putText(
