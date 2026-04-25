@@ -128,9 +128,9 @@ def _draw_hud(frame: np.ndarray, lines: list, category: str) -> None:
 def draw_legend(frame: np.ndarray) -> np.ndarray:
     """Draw a small colour legend in the bottom-left corner."""
     items = [
-        ("▶ MOVING",     STATE_COLORS["MOVING"]),
-        ("■ STATIONARY", STATE_COLORS["STATIONARY"]),
-        ("? UNKNOWN",    STATE_COLORS["UNKNOWN"]),
+        ("MOVING",     STATE_COLORS["MOVING"]),
+        ("STATIONARY", STATE_COLORS["STATIONARY"]),
+        ("UNKNOWN",    STATE_COLORS["UNKNOWN"]),
     ]
     h, w = frame.shape[:2]
     bx, by = 8, h - 10 - 18 * len(items)
