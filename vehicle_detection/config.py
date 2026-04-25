@@ -69,14 +69,14 @@ IMAGE_SIZE            = 640    # Inference resolution (try 416 or 320 for speed)
 # ---------------------------------------------------------------------------
 # Tracking thresholds
 # ---------------------------------------------------------------------------
-MAX_MATCH_DISTANCE_PX  = 50    # Max centroid distance (px) to match a detection to a track
-MOVE_THRESHOLD_PX      = 15    # Total displacement (px) to confirm movement
-SPEED_THRESHOLD_PX_PER_SEC = 10.0
-STATIONARY_SECONDS = 2.0     # Seconds below speed threshold → STATIONARY
+MAX_MATCH_DISTANCE_PX  = 80    # Max centroid distance (px) to match a detection to a track
+MOVE_THRESHOLD_PX      = 35    # Total displacement (px) to confirm movement
+SPEED_THRESHOLD_PX_PER_SEC = 15.0
+STATIONARY_SECONDS = 1.0     # Seconds below speed threshold → STATIONARY
 MAX_MISSING_SECONDS    = 2.0   # Seconds without detection → LOST
 
 # Number of recent positions used to compute instantaneous speed
-SPEED_WINDOW_POSITIONS = 5
+SPEED_WINDOW_POSITIONS = 15
 
 # ---------------------------------------------------------------------------
 # Aggregation window
