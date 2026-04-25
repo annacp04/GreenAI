@@ -58,9 +58,11 @@ class TrafficAggregator:
         vis_heavy      = 0
 
         for tid, tr in active_tracks.items():
-            # Contar como único si aún no lo hemos registrado esta ventana
-            if not tr.is_counted_in_current_window:
+            # Count as unique ONLY when the vehicle has shown movement.
+            # This avoids counting parked vehicles that are visible from the start.
+            if tr.state == "MOVING" and not tr.is_counted_in_current_window:
                 tr.is_counted_in_current_window = True
+
                 if tr.project_class == "light_vehicle":
                     self._seen_ids_motorcycle.add(tid)
                 elif tr.project_class == "medium_vehicle":
@@ -68,13 +70,13 @@ class TrafficAggregator:
                 elif tr.project_class == "heavy_vehicle":
                     self._seen_ids_heavy.add(tid)
 
-            # Contabilizar visibilidad de este frame
-            if tr.project_class == "light_vehicle":
-                vis_motorcycle += 1
-            elif tr.project_class == "medium_vehicle":
-                vis_car += 1
-            elif tr.project_class == "heavy_vehicle":
-                vis_heavy += 1
+            if tr.state == "MOVING":
+                if tr.project_class == "light_vehicle":
+                    vis_motorcycle += 1
+                elif tr.project_class == "medium_vehicle":
+                    vis_car += 1
+                elif tr.project_class == "heavy_vehicle":
+                    vis_heavy += 1
 
         self._frame_counts_motorcycle.append(vis_motorcycle)
         self._frame_counts_car.append(vis_car)
