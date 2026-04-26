@@ -18,4 +18,3 @@ traffic_features.jsonl
 !video1.mp4  # No ignores el video de ejemplo si quieres que otros lo tengan
 
 # Modelos de YOLO (pesos)
-*.pt
