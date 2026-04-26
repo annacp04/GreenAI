@@ -1,2 +1,5 @@
 flask
-opencv-python-headless
+ultralytics>=8.0.0 
+opencv-python-headless           
+
+
