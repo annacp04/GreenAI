@@ -1,0 +1,21 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+
+# Python (archivos compilados)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS (archivos del sistema)
+.DS_Store
+
+# Resultados del detector (opcional)
+traffic_features.csv
+traffic_features.jsonl
+*.mp4
+!video1.mp4  # No ignores el video de ejemplo si quieres que otros lo tengan
+
+# Modelos de YOLO (pesos)
+*.pt
