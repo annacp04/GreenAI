@@ -9,7 +9,7 @@
 ModulinoThermo thermo;
 
 unsigned long previousMillis = 0; 	// Stores last time values were updated
-const long interval = 1000; 		//Every second
+const long interval = 1000; 		// Every second
 
 void setup() {
   Bridge.begin();
@@ -26,13 +26,14 @@ void loop() {
     // Save the last time you updated the values
     previousMillis = currentMillis;
 
-    // Read temperature in Celsius from the sensor
+    // Read temperature and humidity
     float celsius = thermo.getTemperature();
-
-    // Read humidity percentage from the sensor
     float humidity = thermo.getHumidity();
+    
+    // Read light level from analog pin A0 (Standard on UNO Q for the light sensor)
+    float light = (float)analogRead(A0);
 
-    Bridge.notify("record_sensor_samples", celsius, humidity);
+    // Send all 3 values to Python
+    Bridge.notify("record_sensor_samples", celsius, humidity, light);
   }
 }
-

@@ -1,335 +1,149 @@
-// SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
-//
-// SPDX-License-Identifier: MPL-2.0
+// Initialize socket.io connection using the exact pattern from test_camera
+const socket = io(`http://${window.location.host}`); 
 
-const socket = io(`http://${window.location.host}`);
+let canvas, ctx, noSignal, connStatus, errorOverlay;
 
-// Temperature and Humidity chart objects
-const temperatureLive = { canvas: null, chart: null, data: newChartData('orange', 'rgba(255,165,0,0.1)'), unit: '°C' };
-const humidityLive = { canvas: null, chart: null, data: newChartData('teal', 'rgba(0,128,128,0.08)'), unit: '%' };
+let currentImageBitmap = null;
+const sparklines = {};
 
-const temperature1h = { canvas: null, chart: null, data: newChartData('orange', 'rgba(255,165,0,0.1)'), unit: '°C' };
-const humidity1h = { canvas: null, chart: null, data: newChartData('teal', 'rgba(0,128,128,0.08)'), unit: '%' };
+console.log("GreenAI Dashboard Initializing with host:", window.location.host);
 
-const temperature1d = { canvas: null, chart: null, data: newChartData('orange', 'rgba(255,165,0,0.1)'), unit: '°C' };
-const humidity1d = { canvas: null, chart: null, data: newChartData('teal', 'rgba(0,128,128,0.08)'), unit: '%' };
-
-// Derived metrics objects
-const dewPointLive = { canvas: null, chart: null, data: newChartData('blue', 'rgba(0,0,255,0.08)'), unit: '°C' };
-const heatIndexLive = { canvas: null, chart: null, data: newChartData('red', 'rgba(255,0,0,0.08)'), unit: '°C' };
-const absHumidityLive = { canvas: null, chart: null, data: newChartData('purple', 'rgba(128,0,128,0.06)'), unit: 'g/m³' };
-
-const dewPoint1h = { canvas: null, chart: null, data: newChartData('blue', 'rgba(0,0,255,0.08)'), unit: '°C' };
-const heatIndex1h = { canvas: null, chart: null, data: newChartData('red', 'rgba(255,0,0,0.08)'), unit: '°C' };
-const absHumidity1h = { canvas: null, chart: null, data: newChartData('purple', 'rgba(128,0,128,0.06)'), unit: 'g/m³' };
-
-const dewPoint1d = { canvas: null, chart: null, data: newChartData('blue', 'rgba(0,0,255,0.08)'), unit: '°C' };
-const heatIndex1d = { canvas: null, chart: null, data: newChartData('red', 'rgba(255,0,0,0.08)'), unit: '°C' };
-const absHumidity1d = { canvas: null, chart: null, data: newChartData('purple', 'rgba(128,0,128,0.06)'), unit: 'g/m³' };
-
-let liveCircleTimeout = null;
-const noDataTimeout = 10000; // 10 seconds
-
-let errorContainer;
-
-
-document.addEventListener('DOMContentLoaded', () => {
-    // Initialize canvases
-    temperatureLive.canvas = document.getElementById('temperature-live-chart');
-    humidityLive.canvas = document.getElementById('humidity-live-chart');
-    temperature1h.canvas = document.getElementById('temperature-1h-chart');
-    humidity1h.canvas = document.getElementById('humidity-1h-chart');
-    temperature1d.canvas = document.getElementById('temperature-1d-chart');
-    humidity1d.canvas = document.getElementById('humidity-1d-chart');
-    // Derived metrics canvases
-    dewPointLive.canvas = document.getElementById('dew_point-live-chart');
-    heatIndexLive.canvas = document.getElementById('heat_index-live-chart');
-    absHumidityLive.canvas = document.getElementById('absolute_humidity-live-chart');
-    dewPoint1h.canvas = document.getElementById('dew_point-1h-chart');
-    heatIndex1h.canvas = document.getElementById('heat_index-1h-chart');
-    absHumidity1h.canvas = document.getElementById('absolute_humidity-1h-chart');
-    dewPoint1d.canvas = document.getElementById('dew_point-1d-chart');
-    heatIndex1d.canvas = document.getElementById('heat_index-1d-chart');
-    absHumidity1d.canvas = document.getElementById('absolute_humidity-1d-chart');
-
-    // The live circle is hidden initially until data come
-    const liveCircle = document.getElementById('live-circle');
-    if (liveCircle) liveCircle.style.display = 'none';
-
-    errorContainer = document.getElementById('error-container');
-
-    // Tab switching logic
-    document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', function() {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-            this.classList.add('active');
-            document.getElementById(this.dataset.tab).classList.add('active');
-        });
-    });
-
-    document.querySelector('.tab[data-tab="historical-1h"]').addEventListener('click', async () => {
-        const temperature_samples = await listSamples("temperature", "-1h", "5m");
-        renderChartData(temperature1h, temperature_samples, 12, true, false);
-        const humidity_samples = await listSamples("humidity", "-1h", "5m");
-        renderChartData(humidity1h, humidity_samples, 12, true, false);
-        const dew_samples = await listSamples("dew_point", "-1h", "5m");
-        renderChartData(dewPoint1h, dew_samples, 12, true, false);
-        const heat_samples = await listSamples("heat_index", "-1h", "5m");
-        renderChartData(heatIndex1h, heat_samples, 12, true, false);
-        const abs_samples = await listSamples("absolute_humidity", "-1h", "5m");
-        renderChartData(absHumidity1h, abs_samples, 12, true, false);
-    });
-    document.querySelector('.tab[data-tab="historical-1d"]').addEventListener('click', async () => {
-        const temperature_samples = await listSamples("temperature", "-1d", "1h");
-        renderChartData(temperature1d, temperature_samples, 24, false, false);
-        const humidity_samples = await listSamples("humidity", "-1d", "1h");
-        renderChartData(humidity1d, humidity_samples, 24, false, false);
-        const dew_samples = await listSamples("dew_point", "-1d", "1h");
-        renderChartData(dewPoint1d, dew_samples, 24, false, false);
-        const heat_samples = await listSamples("heat_index", "-1d", "1h");
-        renderChartData(heatIndex1d, heat_samples, 24, false, false);
-        const abs_samples = await listSamples("absolute_humidity", "-1d", "1h");
-        renderChartData(absHumidity1d, abs_samples, 24, false, false);
-    });
-
-    // Popover logic for Temperature and Humidity info buttons
-    const tempPopoverText = "Shows temperature readings in °C. Data is average per 1h (1D view) or per 1 minute (1h view)";
-    const humidityPopoverText = "Shows relative humidity percentage. Data is average per 1h (1D view) or per 1 minute (1h view)";
-    const dewPointPopoverText = "Dew Point is the temperature at which air becomes saturated with moisture. It indicates the absolute humidity level.";
-    const heatIndexPopoverText = "Heat Index combines air temperature and relative humidity to determine the perceived temperature.";
-    const absHumidityPopoverText = "Absolute Humidity is the total amount of water vapor present in the air, expressed in grams per cubic meter (g/m³).";
-    document.querySelectorAll('.info-btn.temp').forEach(img => {
-        img.style.position = 'relative';
-        const popover = img.nextElementSibling;
-        img.addEventListener('mouseenter', () => {
-            popover.textContent = tempPopoverText;
-            popover.style.display = 'block';
-        });
-        img.addEventListener('mouseleave', () => {
-            popover.style.display = 'none';
-        });
-    });
-    document.querySelectorAll('.info-btn.humidity').forEach(img => {
-        img.style.position = 'relative';
-        const popover = img.nextElementSibling;
-        img.addEventListener('mouseenter', () => {
-            popover.textContent = humidityPopoverText;
-            popover.style.display = 'block';
-        });
-        img.addEventListener('mouseleave', () => {
-            popover.style.display = 'none';
-        });
-    });
-    document.querySelectorAll('.info-btn.dew').forEach(img => {
-        img.style.position = 'relative';
-        const popover = img.nextElementSibling;
-        img.addEventListener('mouseenter', () => {
-            popover.textContent = dewPointPopoverText;
-            popover.style.display = 'block';
-        });
-        img.addEventListener('mouseleave', () => {
-            popover.style.display = 'none';
-        });
-    });
-    document.querySelectorAll('.info-btn.heat').forEach(img => {
-        img.style.position = 'relative';
-        const popover = img.nextElementSibling;
-        img.addEventListener('mouseenter', () => {
-            popover.textContent = heatIndexPopoverText;
-            popover.style.display = 'block';
-        });
-        img.addEventListener('mouseleave', () => {
-            popover.style.display = 'none';
-        });
-    });
-    document.querySelectorAll('.info-btn.abs').forEach(img => {
-        img.style.position = 'relative';
-        const popover = img.nextElementSibling;
-        img.addEventListener('mouseenter', () => {
-            popover.textContent = absHumidityPopoverText;
-            popover.style.display = 'block';
-        });
-        img.addEventListener('mouseleave', () => {
-            popover.style.display = 'none';
-        });
-    });
-    initSocketIO();
-});
+const metricConfigs = {
+    'temperature': { id: 'temp', color: '#ff8c42', min: 10, max: 40 },
+    'humidity': { id: 'hum', color: '#42a5f5', min: 0, max: 100 },
+    'light': { id: 'light', color: '#ffeb3b', min: 0, max: 1024 },
+    'dew_point': { id: 'dew', color: '#9c27b0', min: 0, max: 30 },
+    'heat_index': { id: 'heat', color: '#f44336', min: 10, max: 50 },
+    'absolute_humidity': { id: 'abs', color: '#00ff88', min: 0, max: 30 }
+};
 
 function initSocketIO() {
     socket.on('connect', () => {
-        if (errorContainer) {
-            errorContainer.style.display = 'none';
-            errorContainer.textContent = '';
-        }
+        console.log("Socket connected to board!");
+        connStatus.textContent = 'Connected';
+        connStatus.className = 'status-badge connected';
+        errorOverlay.classList.add('hidden');
     });
 
     socket.on('disconnect', (reason) => {
-        if (errorContainer) {
-            errorContainer.textContent = 'Connection to the board lost. Please check the connection.';
-            errorContainer.style.display = 'block';
+        console.warn("Socket disconnected:", reason);
+        connStatus.textContent = 'Disconnected';
+        connStatus.className = 'status-badge disconnected';
+        errorOverlay.classList.remove('hidden');
+    });
+
+    socket.on('connect_error', (err) => {
+        console.error("Socket connection error:", err);
+    });
+
+    // Camera Frame Handler
+    socket.on('camera_frame', async (message) => {
+        if (noSignal && !noSignal.classList.contains('hidden')) {
+            console.log("Stream active: Frame received");
+            noSignal.classList.add('hidden');
         }
+        await renderFrame(message.image, message.image_type);
     });
 
-    // Temperature and Humidity live updates
-    socket.on('temperature', (message) => {
-        renderChartData(temperatureLive, [message]);
-    });
-
-    socket.on('humidity', (message) => {
-        renderChartData(humidityLive, [message]);
-    });
-    socket.on('dew_point', (message) => {
-        renderChartData(dewPointLive, [message]);
-    });
-    socket.on('heat_index', (message) => {
-        renderChartData(heatIndexLive, [message]);
-    });
-    socket.on('absolute_humidity', (message) => {
-        renderChartData(absHumidityLive, [message]);
+    // Metrics Handlers
+    Object.keys(metricConfigs).forEach(key => {
+        socket.on(key, (data) => {
+            updateMetricUI(key, data.value);
+        });
     });
 }
 
-async function listSamples(resource, start, aggr_window) {
+async function renderFrame(base64Image, type) {
     try {
-        const response = await fetch(`http://${window.location.host}/get_samples/${resource}/${start}/${aggr_window}`);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        if (data.error) {
-            console.log(`Failed to get samples: ${data.error}`);
-            return;
-        }
-        return data;
-    } catch (error) {
-        console.log(`Error fetching samples: ${error.message}`);
+        const bytes = base64ToUint8Array(base64Image);
+        const blob = new Blob([bytes], { type: type });
+
+        if (currentImageBitmap) currentImageBitmap.close();
+        currentImageBitmap = await createImageBitmap(blob);
+
+        if (canvas.width !== currentImageBitmap.width) canvas.width = currentImageBitmap.width;
+        if (canvas.height !== currentImageBitmap.height) canvas.height = currentImageBitmap.height;
+
+        ctx.drawImage(currentImageBitmap, 0, 0);
+    } catch (e) {
+        // console.error("Frame render error:", e);
     }
 }
 
-function renderChartData(obj, messages, maxPoints = 20, showMinutes = true, showSeconds = true) {
-    if (!messages || messages.length === 0) {
-        return;
+function base64ToUint8Array(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
     }
-
-    const noDataDiv = document.getElementById((obj.canvas && obj.canvas.id) + '-nodata');
-    const liveCircle = document.getElementById('live-circle');
-    const isLiveChart = obj.canvas && obj.canvas.id && obj.canvas.id.endsWith('-live-chart');
-
-    // Only clear data for non-live charts
-    if (!isLiveChart) {
-        obj.data.labels = [];
-        obj.data.datasets[0].data = [];
-    }
-
-    for (const message of messages) {
-        if (!message.ts) {
-            console.warn('Invalid message format:', message);
-            continue;
-        }
-
-        let date = new Date(message.ts);
-        if (showMinutes && showSeconds) {
-            date = date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
-        } else if (showMinutes) {
-            date = date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-        } else {
-            date = date.toLocaleTimeString([], {hour: '2-digit'});
-        }
-
-        obj.data.labels.push(date);
-        obj.data.datasets[0].data.push(message.value);
-
-        // Keep only the n points
-        if (obj.data.labels.length > maxPoints) {
-            obj.data.labels.shift();
-            obj.data.datasets[0].data.shift();
-        }
-
-        if (obj.data.labels.length === 0 || obj.data.datasets[0].data.length === 0) {
-            if (obj.canvas) obj.canvas.style.display = 'none';
-            if (noDataDiv) noDataDiv.style.display = 'flex';
-            if (isLiveChart && liveCircle) {
-                liveCircle.style.display = 'none';
-                liveCircle.classList.remove('flash');
-                if (liveCircleTimeout) {
-                    clearTimeout(liveCircleTimeout);
-                    liveCircleTimeout = null;
-                }
-            }
-            if (obj.chart) {
-                obj.chart.destroy();
-                obj.chart = null;
-            }
-        } else {
-            if (obj.canvas) obj.canvas.style.display = 'block';
-            if (noDataDiv) noDataDiv.style.display = 'none';
-            if (isLiveChart && liveCircle) {
-                liveCircle.style.display = 'flex';
-                liveCircle.classList.add('flash');
-                if (liveCircleTimeout) clearTimeout(liveCircleTimeout);
-                liveCircleTimeout = setTimeout(() => {
-                    liveCircle.classList.remove('flash');
-                    liveCircle.style.display = 'none';
-                }, noDataTimeout);
-            }
-            if (!obj.chart) {
-                obj.chart = newChart(obj.canvas.getContext('2d'), obj);
-            } else {
-                obj.chart.update();
-            }
-        }
-    }
+    return bytes;
 }
 
-function newChart(ctx, obj) {
-    return new Chart(ctx, {
-        type: 'line',
-        data: obj.data,
-        options: {
-            responsive: true,
-            animation: false,
-            scales: {
-                y: obj.unit === '%' ? { min: 0, max: 100 } : {},
-                x: {
-                    grid: { display: false },
-                    ticks: {
-                        maxRotation: 45,
-                        minRotation: 45
-                    }
-                }
+function updateMetricUI(key, value) {
+    const config = metricConfigs[key];
+    const el = document.getElementById(`val-${config.id}`);
+    if (el) el.textContent = value.toFixed(1);
+    updateSparkline(key, value);
+}
+
+function updateSparkline(key, value) {
+    const config = metricConfigs[key];
+    if (!sparklines[key]) {
+        const c = document.getElementById(`chart-${config.id}`);
+        if (!c) return;
+        
+        sparklines[key] = new Chart(c, {
+            type: 'line',
+            data: {
+                labels: Array(20).fill(''),
+                datasets: [{
+                    data: Array(20).fill(null),
+                    borderColor: config.color,
+                    borderWidth: 2,
+                    fill: true,
+                    backgroundColor: hexToRgba(config.color, 0.1),
+                    tension: 0.4,
+                    pointRadius: 0
+                }]
             },
-            interaction: {
-                mode: 'index',
-                intersect: false
-            },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    displayColors: false,
-                    callbacks: {
-                        title: function() { return ''; },
-                        label: function(context) {
-                            const unit = context.chart && context.chart.options && context.chart.options._unit ? context.chart.options._unit : (obj.unit || '');
-                            // store unit in chart options for future reference
-                            if (!context.chart.options._unit) context.chart.options._unit = obj.unit;
-                            return `${context.label} - ${context.parsed.y.toFixed(1)} ${unit}`;
-                        }
-                    }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { 
+                    x: { display: false }, 
+                    y: { 
+                        display: true, 
+                        position: 'right',
+                        suggestedMin: config.min, 
+                        suggestedMax: config.max,
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        ticks: { color: 'rgba(255,255,255,0.5)', font: { size: 10 } }
+                    } 
                 },
-                noDataMessage: true
+                plugins: { legend: { display: false } }
             }
-        }
-    });
+        });
+    }
+
+    const chart = sparklines[key];
+    chart.data.datasets[0].data.push(value);
+    chart.data.datasets[0].data.shift();
+    chart.update('none');
 }
 
-function newChartData(borderColor, backgroundColor) {
-    return {
-        labels: [],
-        datasets: [{
-            data: [],
-            borderColor: borderColor,
-            backgroundColor: backgroundColor,
-            fill: true,
-        }]
-    };
+function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+    canvas = document.getElementById('videoCanvas');
+    ctx = canvas.getContext('2d');
+    noSignal = document.getElementById('no-signal');
+    connStatus = document.getElementById('connection-status');
+    errorOverlay = document.getElementById('error-overlay');
+    
+    initSocketIO();
+});

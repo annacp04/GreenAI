@@ -1,333 +1,255 @@
-/*
- * SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
- *
- * SPDX-License-Identifier: MPL-2.0
- */
+:root {
+    --bg-dark: #0a0b10;
+    --sidebar-bg: #11131c;
+    --panel-bg: #161925;
+    --accent-green: #00ff88;
+    --accent-blue: #00d4ff;
+    --text-primary: #ffffff;
+    --text-secondary: #8b949e;
+    --danger: #ff4d4d;
+    --card-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
 
- @import url('fonts/fonts.css');
-
-/*
- * This CSS is used to center the various elements on the screen
- */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
 
 body {
-    margin: 0;
-    padding: 20px;
-    background-color: #DAE3E3;
-    color: #333;
+    font-family: 'Outfit', sans-serif;
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    display: flex;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 240px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
     display: flex;
     flex-direction: column;
-    align-items: center;
+    padding: 32px 0;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
 }
 
-.app-container {
-    max-width: 1300px;
-}
-
-.main-content {
-    gap: 32px;
-    align-items: flex-start;
-    justify-content: center;
-}
-
-.header {
+.logo {
+    padding: 0 24px;
+    margin-bottom: 48px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    margin-bottom: 24px;
-    box-sizing: border-box;
+    gap: 12px;
 }
 
-.header h1 { margin: 0; }
-
-.container {
-    display: flex;
-    width: 550px;
-    min-width: 550px;
-    padding: 16px;
-    flex-direction: column;
-    justify-content: center;
-    gap: 16px;
-    border-radius: 8px;
-    background: #ECF1F1;
-    position: relative;
-}
-
-h1, h2 {
-    color: #2c3e50;
-    text-align: center;
-}
-
-.arduino-text {
-    color: #008184;
-    font-family: "Roboto Mono", monospace;
+.logo-icon { font-size: 24px; }
+.logo-text {
+    font-weight: 600;
     font-size: 20px;
-    font-style: normal;
-    font-weight: 700;
-    line-height: 170%;
-    margin: 0;
-    letter-spacing: 2.4px;
+    letter-spacing: -0.5px;
 }
 
-.arduino-logo {
-    height: 24px;
-    width: auto;
-}
-
-/*
- * Styles for specific components required by Data Logger
- */
-
-.tabs {
-    display: inline-flex;
-    width: auto;
-    justify-content: center;
-    gap: 8px;
-    align-self: stretch;
-    border-radius: 8px;
-    background: #ECF1F1;
-    margin-bottom: 1em;
-    overflow: hidden;
-    height: 27px;
-    border: 1px solid #C9D2D2;
-    padding: 2px;
-}
-
-.tab {
-    color: #2C353A;
-    text-align: center;
-    font-family: "Open Sans", serif;
-    font-size: 12px;
-    font-style: normal;
-    font-weight: 400;
-    line-height: 160%;
-    letter-spacing: 0.14px;
-}
-
-.tab,
-.tab.active {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: center;
-    width: 148px;
-    height: 27px;
-    gap: 8px;
-    background: transparent;
-    border: none;
-    border-radius: 0;
-}
-
-.tab.active {
-    background: #FFF;
-    color: #008184;
-    text-align: center;
-    font-family: "Open Sans", serif;
-    font-size: 12px;
-    font-style: normal;
-    font-weight: 700;
-    line-height: 160%;
-    border-radius: 6px;
-    border: 1px solid #C9D2D2;
-}
-
-.tab-content {
-    display: none;
-    gap: 24px;
-    align-items: flex-start; /* prevent children from stretching to full height */
-    flex-wrap: wrap; /* allow children to wrap to next line */
-}
-.tab-content.active {
-    display: flex;
-}
-
-.tab-with-circle {
-    display: flex;
-    align-items: center;
-    gap: 8px; /* Add space between text and circle */
-}
-
-#live-circle {
-    display: flex;
-    width: 8px;
-    height: 8px;
-    justify-content: center;
-    align-items: center;
-    flex-shrink: 0;
-    border-radius: 33px;
-    background: #AA4335;
-}
-#live-circle.flash {
-    animation: flash-circle 1s infinite alternate;
-}
-
-@keyframes flash-circle {
-    from { opacity: 1; }
-    to { opacity: 0; }
-}
-
-.graph-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: #2C353A;
-    font-family: 'Roboto Mono', monospace;
-    font-size: 14px;
-    font-style: normal;
-    font-weight: 700;
-    letter-spacing: 1.6px;
-    padding-top: 0;
-    padding-bottom: 20px;
-    text-align: left;
-    position: relative;
-}
-
-.info-btn {
-    width: 14px;
-    height: 14px;
+nav ul { list-style: none; }
+nav li {
+    padding: 12px 24px;
+    color: var(--text-secondary);
     cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 500;
+}
+
+nav li:hover { color: var(--text-primary); background: rgba(255,255,255,0.02); }
+nav li.active {
+    color: var(--accent-green);
+    background: rgba(0, 255, 136, 0.05);
+    border-right: 3px solid var(--accent-green);
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 0 24px;
+}
+
+.btn-download {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    text-align: center;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: var(--text-primary);
+    text-decoration: none;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.btn-download:hover { background: var(--accent-green); color: var(--bg-dark); font-weight: 600; }
+
+/* Main Content */
+.content {
+    margin-left: 240px;
+    flex: 1;
+    padding: 40px;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 40px;
+}
+
+h1 { font-size: 24px; font-weight: 500; }
+
+.status-badge {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(255,255,255,0.05);
+}
+
+.status-badge.connected { color: var(--accent-green); border: 1px solid rgba(0, 255, 136, 0.2); }
+.status-badge.disconnected { color: var(--danger); border: 1px solid rgba(255, 77, 77, 0.2); }
+
+/* Dashboard Grid */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 24px;
+}
+
+.panel {
+    background-color: var(--panel-bg);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: var(--card-shadow);
+    border: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.panel-header h3 { font-size: 16px; font-weight: 600; color: var(--text-secondary); }
+
+.live-indicator {
+    color: var(--danger);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.live-indicator::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    background: var(--danger);
     border-radius: 50%;
-    background-color: #C9D2D2;
-    padding: 2px;
-    transition: background 0.2s;
+    display: inline-block;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.5); opacity: 0.5; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+.canvas-container {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
     position: relative;
 }
 
-.popover {
-    position: absolute;
-    left: 0%;
-    top: 70%;
-    margin-left: 8px;
-    display: none;
-    background: #fff;
-    padding: 16px 24px;
-    border-radius: 6px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    z-index: 10;
-    width: 300px;
-    color: #2C353A;
-    font-weight: 100;
-    font-family: "Open Sans";
-    font-size: 12px;
-    line-height: 170%;
-    letter-spacing: 0.12px;
+#videoCanvas {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
 }
 
-.popover.active {
-    display: block;
+.overlay {
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-secondary);
+    background: rgba(0,0,0,0.4);
+    font-size: 14px;
 }
 
-.nodata-container {
+/* Metrics Grid */
+.metrics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.metric-card {
+    background: var(--panel-bg);
+    padding: 20px;
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.03);
+    position: relative;
+    overflow: hidden;
+    min-height: 200px;
+    display: flex;
+    flex-direction: column;
+}
+
+.card-label { font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
+.card-value { font-size: 32px; font-weight: 600; display: inline-block; }
+.card-unit { font-size: 16px; color: var(--text-secondary); display: inline-block; margin-left: 4px; }
+
+.sparkline {
     position: absolute;
-    top: 56px;
+    bottom: 0;
     left: 0;
     width: 100%;
-    height: calc(100% - 56px);
-    background: #ECF1F1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-direction: column;
-    z-index: 2;
-    font-family: "Open Sans", serif;
+    height: 60%;
+    pointer-events: none;
+    opacity: 0.8;
 }
 
-.nodata-img {
-    width: 64px;
-    height: 64px;
-    margin-bottom: 8px;
+/* Theme Accents */
+.temp .card-value { color: #ff8c42; }
+.humidity .card-value { color: #42a5f5; }
+.light .card-value { color: #ffeb3b; }
+.dew .card-value { color: #9c27b0; }
+.heat .card-value { color: #f44336; }
+.abs-hum .card-value { color: #00ff88; }
+
+.hidden { display: none !important; }
+
+#error-overlay {
+    position: fixed; top:0; left:0; width:100%; height:100%;
+    background: rgba(0,0,0,0.8); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
 }
 
-.no-data {
-    font-size: 12px;
-    font-style: normal;
-    font-weight: 400;
-    color: #2C353A;
-}
-
-/* Layout for the derived metrics row (three charts side-by-side) */
-.derived-row {
-    flex: 1 1 100%; /* take full row below main containers */
-    display: flex;
-    gap: 16px;
-    justify-content: center;
-    align-items: stretch;
-    flex-wrap: wrap; /* allow wrapping on very small screens */
-    margin-top: 16px;
-}
-
-/* Make derived metric containers smaller so three can fit side-by-side */
-.derived-row .derived-container {
-    min-width: 220px;
-    max-width: 420px;
-    box-sizing: border-box;
-}
-
-/* Top row: keep the two main charts side-by-side */
-.top-row {
-    display: flex;
-    gap: 16px;
-    justify-content: center;
-    align-items: flex-start;
-    width: 100%;
-    box-sizing: border-box;
-}
-
-/* When containers are inside .top-row make them take about half the available width so they sit side-by-side */
-.top-row .container {
-    width: calc(50% - 8px);
-    min-width: 280px; /* allow stacking on narrow screens */
-    max-width: 620px;
-}
-
-.error-message {
-    margin-top: 20px;
-    padding: 10px;
-    border-radius: 5px;
-    background-color: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
-}
-
-
-/*
- * Responsive design
- */
+.error-content { text-align: center; }
+.error-content h3 { color: var(--danger); margin-bottom: 8px; }
 
 @media (max-width: 1200px) {
-    .tab-content.active {
-        flex-direction: column;
-    }
-}
-
-@media (max-width: 768px) {
-    .arduino-text {
-        font-size: 14px;
-    }
-
-    .arduino-logo {
-        height: 16px;
-        width: auto;
-    }
-}
-
-@media (max-width: 980px) {
-    .derived-row .derived-container {
-        width: 100%;
-        min-width: unset;
-        max-width: unset;
-    }
-}
-
-@media (max-width: 980px) {
-    .top-row {
-        flex-wrap: wrap;
-    }
-
-    .top-row .container {
-        width: 100%;
-        min-width: unset;
-        max-width: unset;
-    }
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .sidebar { width: 80px; }
+    .logo-text, nav span, .sidebar-footer { display: none; }
+    .content { margin-left: 80px; }
 }

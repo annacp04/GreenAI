@@ -1,8 +1,8 @@
-name: Copy2 of Home climate monitoring and storage
-description: A simple data logger that gets temperature and humidity from the board via Modulino Thermo and stores them in a database.
-ports:
-  - 5000
+name: GreenAI Pollution & Climate Monitor
+description: Professional real-time monitoring of pollution metrics and climate data with integrated optical feed.
+ports: []
 bricks:
+- arduino:camera_code_detection: {}
 - arduino:dbstorage_tsstore: {}
 - arduino:web_ui: {}
-icon: 🎛️
+icon: 🌿
