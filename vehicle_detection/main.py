@@ -1,130 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-License-Identifier: MPL-2.0
+
 """
-main.py
--------
-EdgeAI Green Routes – vehicle detector node.
-Corre en el lado Linux/Python del Arduino UNO Q.
+main.py — EdgeAI Green Routes · Arduino App Lab
+================================================
+Integrates:
+  · Arduino App Lab / Bridge      (temperature + humidity from MCU sketch)
+  · ObjectDetection Brick         (vehicle detection via Edge Impulse YOLOv11)
+  · Flask MJPEG stream            (/video_feed)
+  · Flask dashboard               (/)
+  · Centroid tracker              (CentroidTracker)
+  · Traffic aggregator            (TrafficAggregator)
+  · CSV logger                    (traffic_climate_log.csv)
 
-Salida por ventana de tiempo:
-  - count_motorcycle   : motos únicas vistas
-  - count_car          : coches únicos vistos
-  - count_heavy        : buses/camiones únicos vistos
-  - mean_per_min_*     : media de vehículos visibles por minuto de cada tipo
+Thread layout
+-------------
+  main thread    → App Lab bridge + App.run()
+  camera_thread  → OpenCV capture + ObjectDetection brick + tracker + aggregator (daemon)
+  flask_thread   → Flask HTTP server on 0.0.0.0:5000                             (daemon)
 
-Uso
----
-  python main.py --source 0 --display                        # webcam
-  python main.py --video clip.mp4 --headless --output_csv out.csv
-  python main.py --model yolo11n.pt --video clip.mp4 --display
-  python main.py --source 0 --imgsz 320 --headless           # más rápido en UNO Q
-  python main.py --video clip.mp4 --save_annotated_video demo.mp4
+Shared state (all protected by locks)
+--------------------------------------
+  jpeg_lock   → latest_jpeg    (bytes: last annotated JPEG for /video_feed)
+  live_lock   → latest_live    (dict:  current frame vehicle counts + fps)
+  window_lock → last_window    (dict:  last closed window features)
+  sensor_lock → latest_sensor  (dict:  last temperature/humidity + derived)
 """
 
-from __future__ import annotations
-
-import argparse
 import csv
-import json
-import sys
+import datetime
+import math
+import os
+import threading
 import time
-from typing import Dict, List, Optional
 
 import cv2
+from flask import Flask, Response, jsonify, render_template_string, send_file
 
-from config import (
-    DEFAULT_MODEL,
-    IMAGE_SIZE,
-    CONFIDENCE_THRESHOLD,
-    WINDOW_SECONDS,
-    TERMINAL_PRINT_INTERVAL_SEC,
-)
-from data_structures import Detection, Track, WindowFeatures
-from traffic_aggregator import TrafficAggregator
+# Arduino App Lab imports
+from arduino.app_bricks.dbstorage_tsstore import TimeSeriesStore
+from arduino.app_bricks.object_detection import ObjectDetection
+from arduino.app_utils import App, Bridge
+from arduino.app_utils.image import draw_bounding_boxes
+from arduino.app_bricks.web_ui import WebUI
+
+# Our existing pipeline modules (unchanged)
 from tracker import CentroidTracker
+from traffic_aggregator import TrafficAggregator
 from visualization import draw_frame, draw_legend
-from yolo_detector import YOLODetector
-
 
 # ---------------------------------------------------------------------------
-# CLI
+# Configuration — change these without touching anything else
 # ---------------------------------------------------------------------------
+CAMERA_SOURCE  = 0
+CONFIDENCE     = 0.35
+WINDOW_SECONDS = 60
+CSV_PATH       = "traffic_climate_log.csv"
+FLASK_HOST     = "0.0.0.0"
+FLASK_PORT     = 5000
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="EdgeAI Green Routes – vehicle detector node")
-    p.add_argument("--model",   default=DEFAULT_MODEL,
-                   help="Pesos YOLO (yolov8n.pt o yolo11n.pt)")
-    p.add_argument("--source",  default=None, type=int,
-                   help="Índice de webcam (ej. 0)")
-    p.add_argument("--video",   default=None,
-                   help="Ruta al fichero de vídeo")
-    p.add_argument("--output_csv",  default=None,
-                   help="Ruta del CSV de salida")
-    p.add_argument("--output_json", default=None,
-                   help="Ruta del JSONL de salida")
-    p.add_argument("--display",  action="store_true",
-                   help="Mostrar ventana OpenCV")
-    p.add_argument("--headless", action="store_true",
-                   help="Sin visualización (anula --display)")
-    p.add_argument("--imgsz",   default=IMAGE_SIZE, type=int,
-                   help="Resolución de inferencia YOLO (640, 416, 320)")
-    p.add_argument("--conf",    default=CONFIDENCE_THRESHOLD, type=float,
-                   help="Umbral de confianza YOLO")
-    p.add_argument("--window_seconds", default=WINDOW_SECONDS, type=float,
-                   help="Duración de la ventana de agregación (segundos)")
-    p.add_argument("--use_yolo_tracker", action="store_true",
-                   help="Usar tracker interno de Ultralytics (ByteTrack/BoT-SORT)")
-    p.add_argument("--save_annotated_video", default=None,
-                   help="Guardar vídeo anotado en esta ruta")
-    return p.parse_args()
-
+# Map Edge Impulse / COCO class names → internal categories
+# Adjust keys if your EI project uses different label names
+EI_LABEL_MAP = {
+    "motorcycle": "motorcycle",
+    "motorbike":  "motorcycle",
+    "car":        "car",
+    "vehicle":    "car",
+    "truck":      "heavy",
+    "bus":        "heavy",
+}
 
 # ---------------------------------------------------------------------------
-# Helpers de salida
+# Shared state
 # ---------------------------------------------------------------------------
+latest_jpeg   = None
+latest_live   = {"motorcycle": 0, "car": 0, "heavy": 0, "total": 0, "fps": 0.0}
+last_window   = {}
+latest_sensor = {
+    "temperature_c": None, "humidity_percent": None,
+    "dew_point_c": None, "heat_index_c": None, "absolute_humidity": None,
+}
 
-def init_csv(path: str):
-    """Abre el CSV y escribe la cabecera. Devuelve (file, writer)."""
-    fh = open(path, "w", newline="", encoding="utf-8")
-    fieldnames = list(WindowFeatures(0, 0, 0).to_dict().keys())
-    writer = csv.DictWriter(fh, fieldnames=fieldnames)
-    writer.writeheader()
-    return fh, writer
+jpeg_lock   = threading.Lock()
+live_lock   = threading.Lock()
+window_lock = threading.Lock()
+sensor_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# CSV
+# ---------------------------------------------------------------------------
+CSV_COLUMNS = [
+    "timestamp", "window_start", "window_end", "window_seconds",
+    "temperature_c", "humidity_percent", "dew_point_c",
+    "heat_index_c", "absolute_humidity",
+    "count_motorcycle", "count_car", "count_heavy",
+    "mean_per_min_motorcycle", "mean_per_min_car", "mean_per_min_heavy",
+    "fps_mean",
+]
 
-def print_window_summary(wf: WindowFeatures) -> None:
-    t_start = time.strftime("%H:%M:%S", time.localtime(wf.window_start))
-    t_end   = time.strftime("%H:%M:%S", time.localtime(wf.window_end))
-    print(
-        f"\n{'='*55}\n"
-        f"  VENTANA  {t_start} → {t_end}  ({wf.window_seconds:.0f}s)\n"
-        f"  Vehículos únicos vistos:\n"
-        f"    Motos        : {wf.count_motorcycle}\n"
-        f"    Coches       : {wf.count_car}\n"
-        f"    Buses/Camion : {wf.count_heavy}\n"
-        f"  Media visibles/minuto:\n"
-        f"    Motos        : {wf.mean_per_min_motorcycle:.2f}\n"
-        f"    Coches       : {wf.mean_per_min_car:.2f}\n"
-        f"    Buses/Camion : {wf.mean_per_min_heavy:.2f}\n"
-        f"  FPS medio      : {wf.fps_mean:.1f}\n"
-        f"{'='*55}"
-    )
+def _init_csv():
+    if not os.path.exists(CSV_PATH):
+        with open(CSV_PATH, "w", newline="", encoding="utf-8") as fh:
+            csv.DictWriter(fh, fieldnames=CSV_COLUMNS).writeheader()
+        print(f"[CSV] Created {CSV_PATH}")
 
+def _write_csv_row(wf_dict, sensor):
+    row = {
+        "timestamp":               datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "window_start":            wf_dict.get("window_start", ""),
+        "window_end":              wf_dict.get("window_end", ""),
+        "window_seconds":          wf_dict.get("window_seconds", ""),
+        "temperature_c":           sensor.get("temperature_c", ""),
+        "humidity_percent":        sensor.get("humidity_percent", ""),
+        "dew_point_c":             sensor.get("dew_point_c", ""),
+        "heat_index_c":            sensor.get("heat_index_c", ""),
+        "absolute_humidity":       sensor.get("absolute_humidity", ""),
+        "count_motorcycle":        wf_dict.get("count_motorcycle", 0),
+        "count_car":               wf_dict.get("count_car", 0),
+        "count_heavy":             wf_dict.get("count_heavy", 0),
+        "mean_per_min_motorcycle": wf_dict.get("mean_per_min_motorcycle", 0.0),
+        "mean_per_min_car":        wf_dict.get("mean_per_min_car", 0.0),
+        "mean_per_min_heavy":      wf_dict.get("mean_per_min_heavy", 0.0),
+        "fps_mean":                wf_dict.get("fps_mean", 0.0),
+    }
+    try:
+        with open(CSV_PATH, "a", newline="", encoding="utf-8") as fh:
+            csv.DictWriter(fh, fieldnames=CSV_COLUMNS).writerow(row)
+            fh.flush()
+    except Exception as e:
+        print(f"[CSV] Write error: {e}")
 
-def print_live_status(snapshot: dict, fps: float, window_elapsed: float) -> None:
-    print(
-        f"[{time.strftime('%H:%M:%S')}]  "
-        f"Visibles → motos:{snapshot['motorcycle']}  "
-        f"coches:{snapshot['car']}  "
-        f"pesados:{snapshot['heavy']}  | "
-        f"FPS:{fps:.1f}  Win:{window_elapsed:.0f}s"
-    )
-
-
-def build_detection_by_track(
-    active_tracks: Dict[int, Track],
-    detections: List[Detection],
-) -> Dict[int, Detection]:
-    """Asocia track_id → Detection más reciente (para dibujar los bboxes)."""
-    result: Dict[int, Detection] = {}
+# ---------------------------------------------------------------------------
+# Helper: match active tracks → detections (for bbox drawing)
+# ---------------------------------------------------------------------------
+def _build_detection_by_track(active_tracks, detections):
+    result = {}
     for det in detections:
         best_id, best_dist = None, 9999.0
         for tid, tr in active_tracks.items():
@@ -139,154 +149,441 @@ def build_detection_by_track(
             result[best_id] = det
     return result
 
-
 # ---------------------------------------------------------------------------
-# Bucle principal
+# Camera + ObjectDetection brick loop
 # ---------------------------------------------------------------------------
+def camera_loop():
+    global latest_jpeg, latest_live
 
-def main() -> None:
-    args = parse_args()
-
-    show_display = args.display and not args.headless
-
-    # --- Fuente de vídeo ---------------------------------------------------
-    source = args.source if args.source is not None else args.video
-    if source is None:
-        print("[ERROR] Especifica --source 0 (webcam) o --video <ruta>.")
-        sys.exit(1)
-
-    cap = cv2.VideoCapture(source)
+    print(f"[camera] Opening camera {CAMERA_SOURCE} ...")
+    cap = cv2.VideoCapture(CAMERA_SOURCE)
     if not cap.isOpened():
-        print(f"[ERROR] No se puede abrir la fuente: {source}")
-        sys.exit(1)
+        print(f"[camera] ERROR: cannot open camera {CAMERA_SOURCE}. Check USB connection.")
+        return
 
-    frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    source_fps   = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    print(f"[main] Fuente: {source}  {frame_width}×{frame_height}  {source_fps:.1f} fps")
-
-    # --- Writer de vídeo anotado ------------------------------------------
-    video_writer = None
-    if args.save_annotated_video:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        video_writer = cv2.VideoWriter(
-            args.save_annotated_video, fourcc, source_fps, (frame_width, frame_height)
-        )
-        print(f"[main] Guardando vídeo anotado en: {args.save_annotated_video}")
-
-    # --- Detector YOLO -----------------------------------------------------
-    detector = YOLODetector(model_path=args.model, imgsz=args.imgsz, conf=args.conf)
-
-    # --- Tracker -----------------------------------------------------------
-    tracker    = CentroidTracker()
-    aggregator = TrafficAggregator(window_seconds=args.window_seconds)
-    print(f"[main] Tracker: {'YOLO built-in' if args.use_yolo_tracker else 'Centroide (default)'}")
-    print(f"[main] Ventana: {args.window_seconds}s")
-
-    # --- Ficheros de salida ------------------------------------------------
-    csv_fh = csv_writer = json_fh = None
-    if args.output_csv:
-        csv_fh, csv_writer = init_csv(args.output_csv)
-        print(f"[main] CSV → {args.output_csv}")
-    if args.output_json:
-        json_fh = open(args.output_json, "a", encoding="utf-8")
-        print(f"[main] JSONL → {args.output_json}")
-
-    # --- Estado del bucle --------------------------------------------------
-    frame_count     = 0
-    fps             = 0.0
-    last_print_time = time.time()
-
-    print("[main] Iniciando detección. Pulsa 'q' para salir.\n")
-
+    # ── ObjectDetection brick (replaces YOLODetector) ────────────────────
+    print("[camera] Initialising ObjectDetection brick ...")
     try:
-        while True:
-            t0 = time.time()
-
-            ret, frame = cap.read()
-            if not ret:
-                print("[main] Fin del stream.")
-                break
-
-            frame_count += 1
-            timestamp = time.time()
-
-            # --- Detección -------------------------------------------------
-            if args.use_yolo_tracker:
-                detections, yolo_ids = detector.detect_with_tracker(frame)
-            else:
-                detections = detector.detect(frame)
-                yolo_ids   = None
-
-            # --- Tracking --------------------------------------------------
-            active_tracks = tracker.update(detections, timestamp, yolo_ids)
-
-            # --- Agregación ------------------------------------------------
-            aggregator.update(active_tracks, timestamp, fps)
-
-            # --- Cerrar ventana si toca ------------------------------------
-            elapsed = aggregator.seconds_since_window_start(timestamp)
-            if elapsed >= args.window_seconds:
-                wf = aggregator.close_window(active_tracks, timestamp)
-                print_window_summary(wf)
-
-                if csv_writer:
-                    csv_writer.writerow(wf.to_dict())
-                    csv_fh.flush()
-                if json_fh:
-                    json_fh.write(json.dumps(wf.to_dict()) + "\n")
-                    json_fh.flush()
-
-            # --- FPS -------------------------------------------------------
-            frame_time = time.time() - t0
-            fps = 1.0 / frame_time if frame_time > 0 else 0.0
-
-            # --- Print periódico -------------------------------------------
-            if timestamp - last_print_time >= TERMINAL_PRINT_INTERVAL_SEC:
-                snapshot = aggregator.get_live_snapshot(active_tracks)
-                print_live_status(
-                    snapshot, fps,
-                    aggregator.seconds_since_window_start(timestamp),
-                )
-                last_print_time = timestamp
-
-            # --- Visualización --------------------------------------------
-            if show_display or video_writer:
-                snapshot = aggregator.get_live_snapshot(active_tracks)
-                det_by_track = build_detection_by_track(active_tracks, detections)
-                annotated = draw_frame(
-                    frame,
-                    active_tracks,
-                    det_by_track,
-                    exposure_score=0.0,           # ya no usamos score
-                    exposure_category="",
-                    fps=fps,
-                    window_elapsed_s=aggregator.seconds_since_window_start(timestamp),
-                )
-                draw_legend(annotated)
-
-                if show_display:
-                    cv2.imshow("EdgeAI Green Routes", annotated)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        print("[main] Usuario pulsó 'q'.")
-                        break
-
-                if video_writer:
-                    video_writer.write(annotated)
-
-    finally:
+        detector = ObjectDetection(confidence=CONFIDENCE)
+    except Exception as e:
+        print(f"[camera] ERROR initialising ObjectDetection brick: {e}")
         cap.release()
-        if video_writer:
-            video_writer.release()
-        if show_display:
-            cv2.destroyAllWindows()
-        if csv_fh:
-            csv_fh.close()
-        if json_fh:
-            json_fh.close()
+        return
 
-        print(f"\n[main] Fin. Frames procesados: {frame_count}")
+    tracker    = CentroidTracker()
+    aggregator = TrafficAggregator(window_seconds=WINDOW_SECONDS)
+    fps        = 0.0
 
+    print("[camera] Detection loop started.")
 
-if __name__ == "__main__":
-    main()
+    while True:
+        t0 = time.time()
+
+        ret, frame = cap.read()
+        if not ret:
+            print("[camera] Frame read failed — retrying in 0.1 s ...")
+            time.sleep(0.1)
+            continue
+
+        timestamp = time.time()
+        h, w = frame.shape[:2]
+
+        # ── Encode frame to JPEG bytes for the brick ──────────────────────
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            continue
+        frame_bytes = buf.tobytes()
+
+        # ── Detection via ObjectDetection brick ───────────────────────────
+        try:
+            out = detector.detect(frame_bytes, image_type="jpg")
+        except Exception as e:
+            print(f"[camera] Detection error: {e}")
+            out = {}
+
+        # ── Convert brick output → Detection objects for the tracker ──────
+        from tracker import Detection   # namedtuple/dataclass in your tracker module
+
+        detections = []
+        raw_list = (out or {}).get("detection", [])
+
+        for obj in raw_list:
+            label = EI_LABEL_MAP.get((obj.get("class_name") or "").lower())
+            if label is None:
+                continue                             # ignore irrelevant classes
+
+            conf             = obj.get("confidence", 0.0)
+            x1, y1, x2, y2  = obj.get("bounding_box_xyxy", [0, 0, 0, 0])
+
+            # ── Coord safety: if brick returns 0..1 floats, rescale to px ──
+            # The brick SHOULD return absolute pixel coords, but if the values
+            # are all ≤ 1.0 we assume normalised and rescale defensively.
+            if all(v <= 1.0 for v in (x1, y1, x2, y2)):
+                x1, x2 = int(x1 * w), int(x2 * w)
+                y1, y2 = int(y1 * h), int(y2 * h)
+            else:
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+            detections.append(Detection(
+                centroid=(cx, cy),
+                bbox=(x1, y1, x2, y2),
+                label=label,
+                confidence=conf,
+            ))
+
+        # ── Tracking ──────────────────────────────────────────────────────
+        try:
+            active_tracks = tracker.update(detections, timestamp)
+        except Exception as e:
+            print(f"[camera] Tracker error: {e}")
+            active_tracks = {}
+
+        # ── Aggregation ───────────────────────────────────────────────────
+        aggregator.update(active_tracks, timestamp, fps)
+
+        if aggregator.seconds_since_window_start(timestamp) >= WINDOW_SECONDS:
+            wf      = aggregator.close_window(active_tracks, timestamp)
+            wf_dict = wf.to_dict()
+
+            with sensor_lock:
+                sensor_snap = dict(latest_sensor)
+            with window_lock:
+                last_window.clear()
+                last_window.update(wf_dict)
+
+            _write_csv_row(wf_dict, sensor_snap)
+
+            print(
+                f"[window] motos={wf.count_motorcycle}  coches={wf.count_car}  "
+                f"pesados={wf.count_heavy}  "
+                f"media/min → m:{wf.mean_per_min_motorcycle:.2f} "
+                f"c:{wf.mean_per_min_car:.2f} p:{wf.mean_per_min_heavy:.2f}  "
+                f"fps={wf.fps_mean:.1f}"
+            )
+
+        # ── Live snapshot ─────────────────────────────────────────────────
+        snapshot = aggregator.get_live_snapshot(active_tracks)
+        with live_lock:
+            latest_live.update({**snapshot, "fps": round(fps, 1)})
+
+        # ── Annotate frame ────────────────────────────────────────────────
+        try:
+            det_by_track = _build_detection_by_track(active_tracks, detections)
+            annotated    = draw_frame(
+                frame, active_tracks, det_by_track,
+                exposure_score=0.0, exposure_category="",
+                fps=fps,
+                window_elapsed_s=aggregator.seconds_since_window_start(timestamp),
+            )
+            draw_legend(annotated)
+        except Exception as e:
+            print(f"[camera] Visualization error: {e}")
+            annotated = frame
+
+        # ── Encode final JPEG for /video_feed ─────────────────────────────
+        ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            with jpeg_lock:
+                latest_jpeg = buf.tobytes()
+
+        elapsed = time.time() - t0
+        fps = 1.0 / elapsed if elapsed > 0 else 0.0
+
+    cap.release()
+    print("[camera] Loop ended.")
+
+# ---------------------------------------------------------------------------
+# Flask application
+# ---------------------------------------------------------------------------
+flask_app = Flask(__name__)
+
+def _mjpeg_generator():
+    while True:
+        with jpeg_lock:
+            frame_bytes = latest_jpeg
+        if frame_bytes is None:
+            time.sleep(0.05)
+            continue
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + frame_bytes + b"\r\n"
+        )
+        time.sleep(0.03)   # ~30 fps cap
+
+@flask_app.route("/video_feed")
+def video_feed():
+    return Response(
+        _mjpeg_generator(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+# --- Dashboard HTML (self-contained, no external CDN) ----------------------
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EdgeAI Green Routes — Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e0e0e0;min-height:100vh}
+header{background:#1a1d27;padding:14px 24px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #2a2d3a}
+header h1{font-size:1.2rem;font-weight:600;color:#fff}
+header span{font-size:.8rem;color:#7c8db5}
+.layout{display:grid;grid-template-columns:1fr 340px;gap:16px;padding:16px;max-width:1400px;margin:0 auto}
+.video-panel img{width:100%;border-radius:8px;border:1px solid #2a2d3a;display:block}
+.sidebar{display:flex;flex-direction:column;gap:14px}
+.card{background:#1a1d27;border:1px solid #2a2d3a;border-radius:8px;padding:14px 16px}
+.card h2{font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:#7c8db5;margin-bottom:10px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:#12141c;border-radius:6px;padding:10px 12px}
+.stat .label{font-size:.7rem;color:#7c8db5;margin-bottom:2px}
+.stat .value{font-size:1.4rem;font-weight:700;color:#fff}
+.moto .value{color:#f0a500}.car .value{color:#3ecf8e}.heavy .value{color:#e05252}
+.total .value{color:#60a5fa}.fps .value{font-size:1rem;color:#a78bfa}
+.temp .value{color:#fb923c}.hum .value{color:#38bdf8}
+.dew .value,.ah .value{font-size:1rem;color:#34d399}
+.hi .value{font-size:1rem;color:#f87171}
+.span2{grid-column:span 2}
+.wtable{width:100%;border-collapse:collapse;font-size:.82rem}
+.wtable th{text-align:left;color:#7c8db5;padding:3px 6px;font-weight:500}
+.wtable td{padding:3px 6px}
+.wtable tr:nth-child(even) td{background:#12141c;border-radius:4px}
+.dl-btn{display:block;width:100%;padding:10px;background:#2563eb;color:#fff;border:none;
+        border-radius:6px;font-size:.9rem;font-weight:600;cursor:pointer;text-align:center;
+        text-decoration:none;transition:background .2s}
+.dl-btn:hover{background:#1d4ed8}
+.null{color:#4b5563;font-style:italic}
+</style>
+</head>
+<body>
+<header>
+  <h1>🌿 EdgeAI Green Routes</h1>
+  <span>Live traffic + climate · Arduino UNO Q · Edge Impulse YOLOv11</span>
+</header>
+<div class="layout">
+  <div class="video-panel">
+    <img src="/video_feed" alt="Live camera">
+  </div>
+  <div class="sidebar">
+
+    <div class="card">
+      <h2>Live vehicles (current frame)</h2>
+      <div class="grid2">
+        <div class="stat moto"><div class="label">Motorcycles</div><div class="value" id="lm">—</div></div>
+        <div class="stat car"><div class="label">Cars</div><div class="value" id="lc">—</div></div>
+        <div class="stat heavy"><div class="label">Bus / Truck</div><div class="value" id="lh">—</div></div>
+        <div class="stat total"><div class="label">Total</div><div class="value" id="lt">—</div></div>
+        <div class="stat fps span2"><div class="label">FPS</div><div class="value" id="lf">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Climate (last sensor reading)</h2>
+      <div class="grid2">
+        <div class="stat temp"><div class="label">Temperature</div><div class="value" id="st">—</div></div>
+        <div class="stat hum"><div class="label">Humidity</div><div class="value" id="sh">—</div></div>
+        <div class="stat dew"><div class="label">Dew Point</div><div class="value" id="sd">—</div></div>
+        <div class="stat hi"><div class="label">Heat Index</div><div class="value" id="si">—</div></div>
+        <div class="stat ah span2"><div class="label">Absolute Humidity</div><div class="value" id="sa">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Last window summary</h2>
+      <table class="wtable">
+        <tr><th>Metric</th><th>Motos</th><th>Cars</th><th>Heavy</th></tr>
+        <tr><td>Count (unique)</td><td id="wcm">—</td><td id="wcc">—</td><td id="wch">—</td></tr>
+        <tr><td>Mean / min</td><td id="wmm">—</td><td id="wmc">—</td><td id="wmh">—</td></tr>
+        <tr><td colspan="2" style="color:#7c8db5">Window FPS</td><td colspan="2" id="wfps">—</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Data export</h2>
+      <a class="dl-btn" href="/download/csv">⬇ Download CSV</a>
+    </div>
+
+  </div>
+</div>
+<script>
+function fmt(v,d,u){
+  if(v===null||v===undefined)return '<span class="null">—</span>';
+  return(typeof v==="number"?v.toFixed(d):v)+(u||"");
+}
+async function refreshLive(){
+  try{
+    const d=await fetch("/api/live").then(r=>r.json());
+    document.getElementById("lm").innerHTML=fmt(d.motorcycle,0);
+    document.getElementById("lc").innerHTML=fmt(d.car,0);
+    document.getElementById("lh").innerHTML=fmt(d.heavy,0);
+    document.getElementById("lt").innerHTML=fmt(d.total,0);
+    document.getElementById("lf").innerHTML=fmt(d.fps,1," fps");
+    const s=d.sensor||{};
+    document.getElementById("st").innerHTML=fmt(s.temperature_c,1," °C");
+    document.getElementById("sh").innerHTML=fmt(s.humidity_percent,1," %");
+    document.getElementById("sd").innerHTML=fmt(s.dew_point_c,1," °C");
+    document.getElementById("si").innerHTML=fmt(s.heat_index_c,1," °C");
+    document.getElementById("sa").innerHTML=fmt(s.absolute_humidity,2," g/m³");
+  }catch(e){}
+}
+async function refreshWindow(){
+  try{
+    const w=await fetch("/api/last_window").then(r=>r.json());
+    if(!w||!Object.keys(w).length)return;
+    document.getElementById("wcm").innerHTML=fmt(w.count_motorcycle,0);
+    document.getElementById("wcc").innerHTML=fmt(w.count_car,0);
+    document.getElementById("wch").innerHTML=fmt(w.count_heavy,0);
+    document.getElementById("wmm").innerHTML=fmt(w.mean_per_min_motorcycle,2);
+    document.getElementById("wmc").innerHTML=fmt(w.mean_per_min_car,2);
+    document.getElementById("wmh").innerHTML=fmt(w.mean_per_min_heavy,2);
+    document.getElementById("wfps").innerHTML=fmt(w.fps_mean,1," fps");
+  }catch(e){}
+}
+setInterval(refreshLive,1000);
+setInterval(refreshWindow,5000);
+refreshLive();refreshWindow();
+</script>
+</body>
+</html>"""
+
+@flask_app.route("/")
+def dashboard():
+    return render_template_string(_DASHBOARD_HTML)
+
+@flask_app.route("/api/live")
+def api_live():
+    with live_lock:
+        live = dict(latest_live)
+    with sensor_lock:
+        live["sensor"] = dict(latest_sensor)
+    return jsonify(live)
+
+@flask_app.route("/api/last_window")
+def api_last_window():
+    with window_lock:
+        return jsonify(dict(last_window))
+
+@flask_app.route("/download/csv")
+def download_csv():
+    if not os.path.exists(CSV_PATH):
+        return "CSV not found yet — wait for the first window to close.", 404
+    return send_file(
+        os.path.abspath(CSV_PATH),
+        as_attachment=True,
+        download_name="traffic_climate_log.csv",
+        mimetype="text/csv",
+    )
+
+def start_flask():
+    print(f"[flask] Starting on http://{FLASK_HOST}:{FLASK_PORT}")
+    flask_app.run(host=FLASK_HOST, port=FLASK_PORT,
+                  threaded=True, use_reloader=False, debug=False)
+
+# ---------------------------------------------------------------------------
+# Arduino App Lab — TimeSeriesStore + WebUI
+# ---------------------------------------------------------------------------
+db = TimeSeriesStore()
+
+def _on_get_samples(resource: str, start: str, aggr_window: str):
+    samples = db.read_samples(
+        measure=resource, start_from=start,
+        aggr_window=aggr_window, aggr_func="mean", limit=100,
+    )
+    return [{"ts": s[1], "value": s[2]} for s in samples]
+
+ui = WebUI()
+ui.expose_api("GET", "/get_samples/{resource}/{start}/{aggr_window}", _on_get_samples)
+
+# ---------------------------------------------------------------------------
+# Bridge callback — temperature + humidity from MCU sketch (unchanged)
+# ---------------------------------------------------------------------------
+def record_sensor_samples(celsius: float, humidity: float) -> None:
+    """
+    Called by the MCU sketch via Bridge.notify.
+    Computes dew point, heat index, absolute humidity.
+    Stores everything in TimeSeriesStore, pushes to WebUI,
+    and updates latest_sensor for the camera loop + dashboard.
+    """
+    if celsius is None or humidity is None:
+        print(f"[sensor] Invalid sample: celsius={celsius}, humidity={humidity}")
+        return
+
+    T  = float(celsius)
+    RH = float(humidity)
+    ts = int(datetime.datetime.now().timestamp() * 1000)
+
+    db.write_sample("temperature", T,  ts)
+    db.write_sample("humidity",    RH, ts)
+    ui.send_message("temperature", {"value": T,  "ts": ts})
+    ui.send_message("humidity",    {"value": RH, "ts": ts})
+
+    # Dew point (Magnus formula)
+    a, b      = 17.27, 237.7
+    dew_point = None
+    if RH > 0.0:
+        rh_frac   = max(min(RH, 100.0), 1e-6)
+        gamma     = (a * T) / (b + T) + math.log(rh_frac / 100.0)
+        dew_point = (b * gamma) / (a - gamma)
+
+    # Heat Index (Rothfusz regression)
+    T_f  = T * 9.0 / 5.0 + 32.0
+    R    = max(min(RH, 100.0), 0.0)
+    HI_f = (
+        -42.379
+        + 2.04901523  * T_f
+        + 10.14333127 * R
+        - 0.22475541  * T_f * R
+        - 0.00683783  * T_f * T_f
+        - 0.05481717  * R   * R
+        + 0.00122874  * T_f * T_f * R
+        + 0.00085282  * T_f * R   * R
+        - 0.00000199  * T_f * T_f * R * R
+    )
+    heat_index = (HI_f - 32.0) * 5.0 / 9.0
+
+    # Absolute humidity (g/m³)
+    absolute_humidity = None
+    if RH >= 0.0:
+        es                = 6.112 * math.exp((17.67 * T) / (T + 243.5))
+        absolute_humidity = es * (R / 100.0) * 2.1674 / (273.15 + T)
+
+    if dew_point is not None:
+        db.write_sample("dew_point", float(dew_point), ts)
+        ui.send_message("dew_point", {"value": float(dew_point), "ts": ts})
+    if heat_index is not None:
+        db.write_sample("heat_index", float(heat_index), ts)
+        ui.send_message("heat_index", {"value": float(heat_index), "ts": ts})
+    if absolute_humidity is not None:
+        db.write_sample("absolute_humidity", float(absolute_humidity), ts)
+        ui.send_message("absolute_humidity", {"value": float(absolute_humidity), "ts": ts})
+
+    with sensor_lock:
+        latest_sensor["temperature_c"]     = round(T, 2)
+        latest_sensor["humidity_percent"]  = round(RH, 2)
+        latest_sensor["dew_point_c"]       = round(dew_point,        2) if dew_point        is not None else None
+        latest_sensor["heat_index_c"]      = round(heat_index,       2) if heat_index       is not None else None
+        latest_sensor["absolute_humidity"] = round(absolute_humidity, 3) if absolute_humidity is not None else None
+
+    print(
+        f"[sensor] T={T:.1f}°C  RH={RH:.1f}%  "
+        f"dew={dew_point:.1f}°C  HI={heat_index:.1f}°C  "
+        f"AH={absolute_humidity:.2f} g/m³"
+    )
+
+# ---------------------------------------------------------------------------
+# Start-up
+# ---------------------------------------------------------------------------
+_init_csv()
+
+threading.Thread(target=camera_loop, name="camera", daemon=True).start()
+threading.Thread(target=start_flask,  name="flask",  daemon=True).start()
+
+print("[app] Registering Bridge callback ...")
+Bridge.provide("record_sensor_samples", record_sensor_samples)
+
+print("[app] Starting App Lab runtime ...")
+App.run()
